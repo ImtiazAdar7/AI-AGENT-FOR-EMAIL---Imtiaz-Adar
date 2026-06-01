@@ -71,7 +71,7 @@ class EmailAgent:
     def _initialize_model(self):
         """Initialize Gemini model"""
         try:
-            working_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro']
+            working_models = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro']
             
             for model_name in working_models:
                 try:
