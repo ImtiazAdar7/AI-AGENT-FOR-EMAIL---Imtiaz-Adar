@@ -9,7 +9,7 @@ An intelligent email automation system powered by Google's Gemini AI that can re
 
 ## 🚀 Live Demo
 
-🔗 (Deployed on Render - may take 30s to wake up)
+🔗 [AI EMAIL AGENT](https://tinyurl.com/AiEmailAgentImtiazAdar)
 
 ## ✨ Features
 
