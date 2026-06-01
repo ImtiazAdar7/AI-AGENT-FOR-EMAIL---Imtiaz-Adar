@@ -359,7 +359,6 @@ def main():
         
         st.divider()
         max_emails = st.slider("Max emails to fetch", 5, 50, 20)
-        email_type = st.radio("Email filter:", ["📬 All Inbox", "🆕 Unread Only"], index=0, horizontal=True)
         
         if st.button("🚀 Initialize & Connect", type="primary"):
             if not gemini_key:
@@ -381,7 +380,6 @@ def main():
                             st.session_state.gmail_connected = False
                         
                         st.session_state.initialized = True
-                        st.session_state.email_filter = email_type
                     except Exception as e:
                         st.error(f"Error: {e}")
         
@@ -440,7 +438,6 @@ def main():
                             st.session_state.emails = st.session_state.agent.get_all_emails(max_emails)
                         else:
                             st.session_state.emails = st.session_state.agent.get_unread_emails(max_emails)
-                        st.session_state.email_filter = filter_option
                         st.rerun()
             
             if not hasattr(st.session_state, 'emails'):
@@ -596,7 +593,7 @@ def main():
                 else:
                     st.warning("Please enter a topic")
         
-        # Email Analysis - Beautiful version from your local code
+        # Email Analysis - Beautiful version
         st.subheader("📊 Email Analysis")
         st.markdown("*AI analyzes sentiment, urgency, and provides recommendations*")
         
@@ -624,16 +621,13 @@ ONLY return the JSON, nothing else.
                         response = st.session_state.agent.model.generate_content(prompt)
                         raw_response = response.text.strip()
                         
-                        # Clean the response - remove markdown if present
                         clean_response = raw_response
                         clean_response = re.sub(r'```json\s*', '', clean_response)
                         clean_response = re.sub(r'```\s*', '', clean_response)
                         clean_response = clean_response.strip()
                         
-                        # Parse JSON
                         parsed_data = json.loads(clean_response)
                         
-                        # Display results with beautiful metrics
                         st.markdown("### 📊 Analysis Results")
                         
                         col_a, col_b, col_c = st.columns(3)
