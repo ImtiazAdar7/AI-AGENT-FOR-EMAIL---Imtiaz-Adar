@@ -68,7 +68,7 @@ class EmailAgent:
         """Initialize Gemini model"""
         try:
             # Try different model names
-            models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro']
+            models_to_try = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro']
             
             for model_name in models_to_try:
                 try:
