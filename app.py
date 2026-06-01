@@ -121,17 +121,20 @@ class EmailAgent:
     def authenticate_with_app_password(self, email: str, app_password: str):
         """Authenticate using App Password (works on Render!)"""
         try:
+            # Remove spaces from app password
+            clean_password = app_password.replace(" ", "")
+            
             # Test SMTP connection
             with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-                server.login(email, app_password)
+                server.login(email, clean_password)
             
             # Test IMAP connection for reading emails
             imap = imaplib.IMAP4_SSL('imap.gmail.com')
-            imap.login(email, app_password)
+            imap.login(email, clean_password)
             imap.close()
             
             self.gmail_user = email
-            self.gmail_app_password = app_password
+            self.gmail_app_password = clean_password
             self.use_app_password = True
             
             return True, "✅ Gmail connected successfully with App Password!"
@@ -250,35 +253,100 @@ class EmailAgent:
         except Exception as e:
             st.error(f"Error marking as read: {e}")
     
-    def authenticate_gmail(self, credentials_file: str = 'credentials.json'):
-        """Legacy OAuth method (kept for compatibility)"""
-        if os.environ.get('RENDER') or os.environ.get('STREAMLIT_CLOUD'):
-            self.service = None
-            return False, "Cloud mode: Use App Password method instead."
+    def send_email(self, to: str, subject: str, body: str, thread_id: str = None):
+        """Send email - works with App Password"""
+        if self.use_app_password:
+            return self.send_email_app_password(to, subject, body)
         
-        creds = None
-        token_file = 'token.pickle'
+        if not self.service:
+            return False, "Gmail not connected. Please use App Password method."
         
-        if Path(token_file).exists():
-            with open(token_file, 'rb') as token:
-                creds = pickle.load(token)
-        
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                if not Path(credentials_file).exists():
-                    return False, "credentials.json not found."
-                
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    credentials_file, self.SCOPES)
-                creds = flow.run_local_server(port=0)
+        try:
+            message = self._create_message(to, subject, body)
             
-            with open(token_file, 'wb') as token:
-                pickle.dump(creds, token)
+            if thread_id:
+                result = self.service.users().messages().send(
+                    userId='me', 
+                    body={'raw': message, 'threadId': thread_id}
+                ).execute()
+            else:
+                result = self.service.users().messages().send(
+                    userId='me', 
+                    body={'raw': message}
+                ).execute()
+            
+            return True, result['id']
+        except HttpError as error:
+            return False, str(error)
+    
+    def _create_message(self, to: str, subject: str, body: str) -> str:
+        message_text = f"""To: {to}
+Subject: {subject}
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+{body}
+"""
+        return base64.urlsafe_b64encode(message_text.encode('utf-8')).decode('utf-8')
+    
+    def get_unread_emails(self, max_results: int = 10) -> List[Dict]:
+        """Get unread emails - works with App Password"""
+        if self.use_app_password:
+            return self.get_unread_emails_app_password(max_results)
         
-        self.service = build('gmail', 'v1', credentials=creds)
-        return True, "Authenticated successfully!"
+        if not self.service:
+            return []
+        
+        try:
+            results = self.service.users().messages().list(
+                userId='me', 
+                labelIds=['INBOX'],
+                q='is:unread',
+                maxResults=max_results
+            ).execute()
+            
+            messages = results.get('messages', [])
+            
+            if not messages:
+                return []
+            
+            emails = []
+            for msg in messages:
+                if msg['id'] in self.processed_emails:
+                    continue
+                    
+                msg_data = self.service.users().messages().get(
+                    userId='me', 
+                    id=msg['id'],
+                    format='full'
+                ).execute()
+                
+                email_content = self.extract_email_content(msg_data)
+                emails.append(email_content)
+                self.processed_emails.add(msg['id'])
+            
+            return emails
+            
+        except HttpError as error:
+            st.error(f"Error fetching emails: {error}")
+            return []
+    
+    def mark_as_read(self, message_id: str):
+        """Mark email as read - works with App Password"""
+        if self.use_app_password:
+            return self.mark_as_read_app_password(message_id)
+        
+        if not self.service:
+            return
+        
+        try:
+            self.service.users().messages().modify(
+                userId='me',
+                id=message_id,
+                body={'removeLabelIds': ['UNREAD']}
+            ).execute()
+        except HttpError as error:
+            st.error(f"Error marking as read: {error}")
     
     def extract_email_content(self, message: Dict) -> Dict:
         headers = message['payload']['headers']
@@ -354,101 +422,6 @@ Reply:
             return response.text.strip()
         except Exception as e:
             return f"Thank you for your email. We'll get back to you soon.\n\n(Note: AI generation error: {str(e)})"
-    
-    def send_email(self, to: str, subject: str, body: str, thread_id: str = None):
-        """Send email - works with both OAuth and App Password"""
-        if self.use_app_password:
-            return self.send_email_app_password(to, subject, body)
-        
-        if not self.service:
-            return False, "Gmail not connected."
-        
-        try:
-            message = self._create_message(to, subject, body)
-            
-            if thread_id:
-                result = self.service.users().messages().send(
-                    userId='me', 
-                    body={'raw': message, 'threadId': thread_id}
-                ).execute()
-            else:
-                result = self.service.users().messages().send(
-                    userId='me', 
-                    body={'raw': message}
-                ).execute()
-            
-            return True, result['id']
-        except HttpError as error:
-            return False, str(error)
-    
-    def _create_message(self, to: str, subject: str, body: str) -> str:
-        message_text = f"""To: {to}
-Subject: {subject}
-MIME-Version: 1.0
-Content-Type: text/plain; charset=utf-8
-
-{body}
-"""
-        return base64.urlsafe_b64encode(message_text.encode('utf-8')).decode('utf-8')
-    
-    def get_unread_emails(self, max_results: int = 10) -> List[Dict]:
-        """Get unread emails - works with both OAuth and App Password"""
-        if self.use_app_password:
-            return self.get_unread_emails_app_password(max_results)
-        
-        if not self.service:
-            return []
-        
-        try:
-            results = self.service.users().messages().list(
-                userId='me', 
-                labelIds=['INBOX'],
-                q='is:unread',
-                maxResults=max_results
-            ).execute()
-            
-            messages = results.get('messages', [])
-            
-            if not messages:
-                return []
-            
-            emails = []
-            for msg in messages:
-                if msg['id'] in self.processed_emails:
-                    continue
-                    
-                msg_data = self.service.users().messages().get(
-                    userId='me', 
-                    id=msg['id'],
-                    format='full'
-                ).execute()
-                
-                email_content = self.extract_email_content(msg_data)
-                emails.append(email_content)
-                self.processed_emails.add(msg['id'])
-            
-            return emails
-            
-        except HttpError as error:
-            st.error(f"Error fetching emails: {error}")
-            return []
-    
-    def mark_as_read(self, message_id: str):
-        """Mark email as read - works with both OAuth and App Password"""
-        if self.use_app_password:
-            return self.mark_as_read_app_password(message_id)
-        
-        if not self.service:
-            return
-        
-        try:
-            self.service.users().messages().modify(
-                userId='me',
-                id=message_id,
-                body={'removeLabelIds': ['UNREAD']}
-            ).execute()
-        except HttpError as error:
-            st.error(f"Error marking as read: {error}")
 
 def main():
     from PIL import Image
@@ -482,55 +455,18 @@ def main():
             os.environ['GEMINI_API_KEY'] = gemini_key
         
         st.markdown("---")
-        st.subheader("Gmail Authentication")
+        st.subheader("Gmail Authentication (App Password)")
         
-        # App Password method (works everywhere!)
-        use_app_password = st.checkbox("Use App Password (Recommended for Cloud)", value=True)
+        st.info("""
+        **📧 How to get App Password:**
+        1. Enable 2-Step Verification on your Google Account
+        2. Go to Google Account → Security → App Passwords
+        3. Select 'Mail' and 'Other' (name it 'Email Agent')
+        4. Copy the 16-character password (remove spaces when pasting)
+        """)
         
-        if use_app_password:
-            st.info("""
-            **How to get App Password:**
-            1. Enable 2-Step Verification on your Google Account
-            2. Go to Google Account → Security → App Passwords
-            3. Select 'Mail' and 'Other' (name it 'Email Agent')
-            4. Copy the 16-character password
-            """)
-            
-            gmail_email = st.text_input("Gmail Address", placeholder="youremail@gmail.com")
-            gmail_app_password = st.text_input("App Password", type="password", placeholder="abcd efgh ijkl mnop")
-            
-            if st.button("Connect Gmail", type="primary"):
-                if gmail_email and gmail_app_password:
-                    with st.spinner("Connecting to Gmail..."):
-                        if hasattr(st.session_state, 'agent'):
-                            success, message = st.session_state.agent.authenticate_with_app_password(
-                                gmail_email, 
-                                gmail_app_password.replace(" ", "")
-                            )
-                            if success:
-                                st.success(message)
-                                st.session_state.gmail_connected = True
-                                st.session_state.gmail_method = 'app_password'
-                            else:
-                                st.error(message)
-                        else:
-                            st.warning("Please initialize the AI Agent first")
-                else:
-                    st.warning("Please enter both email and app password")
-        else:
-            # Legacy OAuth method (local only)
-            st.info("Skip if you just want to test AI features")
-            
-            uploaded_file = st.file_uploader(
-                "Upload credentials.json (from Google Cloud Console)",
-                type=['json'],
-                help="Required only for Gmail integration"
-            )
-            
-            if uploaded_file:
-                with open('credentials.json', 'wb') as f:
-                    f.write(uploaded_file.getbuffer())
-                st.success("credentials.json saved!")
+        gmail_email = st.text_input("Gmail Address", placeholder="youremail@gmail.com")
+        gmail_app_password = st.text_input("App Password", type="password", placeholder="abcdefghijklmnop")
         
         st.markdown("---")
         st.subheader("Settings")
@@ -543,7 +479,21 @@ def main():
                 with st.spinner("Initializing AI Agent..."):
                     try:
                         st.session_state.agent = EmailAgent(gemini_key)
-                        st.success(f"AI Agent initialized with {st.session_state.agent.model_name}")
+                        st.success(f"✅ AI Agent initialized with {st.session_state.agent.model_name}")
+                        
+                        # Try to connect Gmail if credentials provided
+                        if gmail_email and gmail_app_password:
+                            success, message = st.session_state.agent.authenticate_with_app_password(
+                                gmail_email, 
+                                gmail_app_password
+                            )
+                            if success:
+                                st.success(message)
+                                st.session_state.gmail_connected = True
+                            else:
+                                st.error(message)
+                        else:
+                            st.info("💡 Enter Gmail credentials above to connect")
                         
                         st.session_state.initialized = True
                         
@@ -557,9 +507,11 @@ def main():
             st.metric("Model", st.session_state.agent.model_name)
             if hasattr(st.session_state, 'gmail_connected') and st.session_state.gmail_connected:
                 st.success("✅ Gmail Connected")
+            else:
+                st.info("⚡ Gmail not connected - Enter credentials above")
     
     if not hasattr(st.session_state, 'initialized') or not st.session_state.initialized:
-        st.info("Please enter your Gemini API Key and click 'Initialize Agent'")
+        st.info("👈 Please enter your Gemini API Key and click 'Initialize Agent'")
         
         with st.expander("Quick Start Guide (FREE)", expanded=True):
             st.markdown("""
@@ -569,17 +521,17 @@ def main():
             3. Click Create API Key
             4. Copy the key
 
-            ### Step 2: Get Gmail App Password (Optional)
+            ### Step 2: Get Gmail App Password
             1. Enable 2-Step Verification on your Google Account
             2. Go to Security → App Passwords
             3. Generate password for 'Mail' and 'Other'
             4. Copy the 16-character password
 
-            ### Step 3: Use the AI Features
-            - Generate AI replies to any email
-            - Analyze email sentiment
-            - Create professional emails
-            - Send real emails with Gmail
+            ### Step 3: Connect and Use
+            1. Enter Gemini API Key
+            2. Enter Gmail + App Password
+            3. Click Initialize Agent
+            4. Start automating emails!
             """)
         return
     
@@ -589,7 +541,7 @@ def main():
         st.header("Email Inbox")
         
         if not hasattr(st.session_state, 'gmail_connected') or not st.session_state.gmail_connected:
-            st.warning("Gmail not connected. Use App Password in sidebar to enable email features.")
+            st.warning("⚠️ Gmail not connected. Enter your Gmail credentials in the sidebar and re-initialize.")
         else:
             col1, col2 = st.columns([3, 1])
             with col1:
@@ -599,7 +551,7 @@ def main():
                         st.rerun()
             
             if hasattr(st.session_state, 'emails') and st.session_state.emails:
-                st.success(f"Found {len(st.session_state.emails)} unread email(s)")
+                st.success(f"📬 Found {len(st.session_state.emails)} unread email(s)")
                 
                 for idx, email in enumerate(st.session_state.emails):
                     with st.container():
@@ -611,20 +563,20 @@ def main():
                         </div>
                         """, unsafe_allow_html=True)
                         
-                        with st.expander("View Email Body"):
+                        with st.expander("📝 View Email Body"):
                             st.text(email['body'][:500] + "..." if len(email['body']) > 500 else email['body'])
                         
                         col1, col2, col3 = st.columns(3)
                         
                         with col1:
-                            if st.button(f"Generate AI Reply", key=f"gen_{idx}"):
+                            if st.button(f"🤖 Generate AI Reply", key=f"gen_{idx}"):
                                 with st.spinner("Generating AI response..."):
                                     reply = st.session_state.agent.generate_ai_reply(email)
                                     st.session_state[f"reply_{idx}"] = reply
-                                    st.success("Reply generated!")
+                                    st.success("✅ Reply generated!")
                         
                         with col2:
-                            if st.button(f"Send Reply", key=f"send_{idx}"):
+                            if st.button(f"📤 Send Reply", key=f"send_{idx}"):
                                 if f"reply_{idx}" in st.session_state:
                                     success, result = st.session_state.agent.send_email(
                                         to=email['from'],
@@ -633,7 +585,7 @@ def main():
                                         thread_id=email['thread_id']
                                     )
                                     if success:
-                                        st.success(f"Reply sent to {email['from']}")
+                                        st.success(f"✅ Reply sent to {email['from']}")
                                         st.session_state.agent.mark_as_read(email['message_id'])
                                         st.rerun()
                                     else:
@@ -642,13 +594,13 @@ def main():
                                     st.warning("Generate reply first")
                         
                         with col3:
-                            if st.button(f"Mark as Read", key=f"read_{idx}"):
+                            if st.button(f"✓ Mark as Read", key=f"read_{idx}"):
                                 st.session_state.agent.mark_as_read(email['message_id'])
                                 st.success("Marked as read")
                                 st.rerun()
                         
                         if f"reply_{idx}" in st.session_state:
-                            st.markdown("### AI Generated Reply:")
+                            st.markdown("### 🤖 AI Generated Reply:")
                             st.info(st.session_state[f"reply_{idx}"])
                         
                         st.markdown("---")
@@ -656,7 +608,7 @@ def main():
                 st.info("Click 'Fetch Unread Emails' to check your inbox")
     
     with tab2:
-        st.header("Compose New Email")
+        st.header("✍️ Compose New Email")
         
         col1, col2 = st.columns(2)
         
@@ -664,13 +616,13 @@ def main():
             recipient = st.text_input("To:", placeholder="recipient@example.com")
             subject = st.text_input("Subject:", placeholder="Email subject")
             
-            if st.button("AI-Assisted Writing", use_container_width=True):
+            if st.button("✨ AI-Assisted Writing", use_container_width=True):
                 if subject:
                     with st.spinner("Generating email content..."):
                         prompt = f"Write a professional email with subject '{subject}'. Keep it concise (3-4 sentences)."
                         response = st.session_state.agent.model.generate_content(prompt)
                         st.session_state.ai_body = response.text
-                        st.success("Email generated! Review and edit below.")
+                        st.success("✅ Email generated! Review and edit below.")
                 else:
                     st.warning("Please enter a subject first")
         
@@ -680,25 +632,25 @@ def main():
                                height=300,
                                placeholder="Write your email here or use AI to generate")
         
-        if st.button("Send Email", type="primary", use_container_width=True):
+        if st.button("📤 Send Email", type="primary", use_container_width=True):
             if recipient and subject and body:
                 if hasattr(st.session_state, 'gmail_connected') and st.session_state.gmail_connected:
                     success, result = st.session_state.agent.send_email(recipient, subject, body)
                     if success:
-                        st.success(f"Email sent successfully to {recipient}")
+                        st.success(f"✅ Email sent successfully to {recipient}")
                         st.balloons()
                         st.session_state.ai_body = ""
                         st.rerun()
                     else:
                         st.error(f"Failed to send: {result}")
                 else:
-                    st.info("Connect Gmail in sidebar to send real emails")
+                    st.info("💡 Connect Gmail in sidebar to send real emails")
                     st.code(f"To: {recipient}\nSubject: {subject}\n\n{body}")
             else:
                 st.warning("Please fill all fields")
     
     with tab3:
-        st.header("AI Playground - Test Without Gmail")
+        st.header("🤖 AI Playground - Test Without Gmail")
         st.markdown("*Test AI capabilities before connecting Gmail*")
         
         col1, col2 = st.columns(2)
@@ -711,7 +663,7 @@ def main():
                 placeholder="Subject: Question about services\n\nHi, I'm interested in your AI services."
             )
             
-            if st.button("Generate Test Reply", use_container_width=True):
+            if st.button("🤖 Generate Test Reply", use_container_width=True):
                 if test_email:
                     with st.spinner("AI is thinking..."):
                         test_data = {
@@ -720,7 +672,7 @@ def main():
                             'body': test_email
                         }
                         reply = st.session_state.agent.generate_ai_reply(test_data)
-                        st.markdown("### AI Generated Reply:")
+                        st.markdown("### 🤖 AI Generated Reply:")
                         st.success(reply)
                 else:
                     st.warning("Please enter a test email")
@@ -730,15 +682,15 @@ def main():
             topic = st.text_input("What's the email about?", placeholder="Product launch, Meeting request")
             tone = st.selectbox("Tone", ["Professional", "Friendly", "Formal", "Casual"])
             
-            if st.button("Generate Email", use_container_width=True):
+            if st.button("✨ Generate Email", use_container_width=True):
                 if topic:
                     with st.spinner("Crafting email..."):
                         prompt = f"Write a {tone.lower()} email about: {topic}. Keep it concise (3-4 sentences)."
                         response = st.session_state.agent.model.generate_content(prompt)
-                        st.markdown("### Generated Email:")
+                        st.markdown("### 📧 Generated Email:")
                         st.code(response.text)
                         st.download_button(
-                            label="Download Email",
+                            label="📥 Download Email",
                             data=response.text,
                             file_name="generated_email.txt",
                             mime="text/plain"
@@ -746,7 +698,7 @@ def main():
                 else:
                     st.warning("Please enter a topic")
         
-        st.subheader("Email Analysis")
+        st.subheader("📊 Email Analysis")
         
         email_to_analyze = st.text_area(
             "Paste email for AI analysis",
@@ -755,7 +707,7 @@ def main():
             placeholder="Example: Hi team, I'm extremely frustrated! The system has been down for 2 hours."
         )
         
-        if st.button("Analyze Email", use_container_width=True, key="analyze_btn"):
+        if st.button("🔍 Analyze Email", use_container_width=True, key="analyze_btn"):
             if email_to_analyze:
                 with st.spinner("Analyzing email with AI..."):
                     prompt = f"""
@@ -823,7 +775,7 @@ ONLY return the JSON, nothing else.
                 st.warning("Please paste an email to analyze")
     
     with tab4:
-        st.header("Analytics Dashboard")
+        st.header("📊 Analytics Dashboard")
         
         if hasattr(st.session_state, 'emails') and st.session_state.emails:
             df = pd.DataFrame(st.session_state.emails)
