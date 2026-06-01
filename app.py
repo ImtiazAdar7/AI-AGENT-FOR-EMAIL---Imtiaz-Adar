@@ -145,32 +145,41 @@ class EmailAgent:
     try:
         clean_password = app_password.replace(" ", "")
         
-        # Try different SMTP ports
-        smtp_ports = [587, 465, 25]
-        smtp_connected = False
+        # Try ALL possible SMTP configurations
+        smtp_configs = [
+            ('smtp.gmail.com', 587, 'tls'),
+            ('smtp.gmail.com', 465, 'ssl'),
+        ]
         
-        for port in smtp_ports:
+        smtp_success = False
+        
+        for host, port, security in smtp_configs:
             try:
-                if port == 587:
-                    server = smtplib.SMTP('smtp.gmail.com', port)
+                if security == 'tls':
+                    server = smtplib.SMTP(host, port)
+                    server.ehlo()
                     server.starttls()
+                    server.ehlo()
                 else:
-                    server = smtplib.SMTP_SSL('smtp.gmail.com', port)
+                    server = smtplib.SMTP_SSL(host, port)
                 
                 server.login(email, clean_password)
                 server.quit()
-                smtp_connected = True
+                smtp_success = True
                 break
             except:
                 continue
         
-        if not smtp_connected:
-            return False, "Cannot connect to Gmail SMTP. Render may be blocking the connection."
+        if not smtp_success:
+            return False, "Cannot connect to Gmail SMTP. Please check your App Password or Render network settings."
         
-        # Try IMAP with different ports
-        imap = imaplib.IMAP4_SSL('imap.gmail.com', 993)
-        imap.login(email, clean_password)
-        imap.close()
+        # Try IMAP for reading emails
+        try:
+            imap = imaplib.IMAP4_SSL('imap.gmail.com', 993)
+            imap.login(email, clean_password)
+            imap.close()
+        except:
+            pass  # IMAP might fail but sending may still work
         
         self.gmail_user = email
         self.gmail_app_password = clean_password
