@@ -1,0 +1,12 @@
+# requirements.txt
+google-generativeai
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+streamlit
+beautifulsoup4
+python-dotenv
+requests
+pandas
+plotly
+Pillow
