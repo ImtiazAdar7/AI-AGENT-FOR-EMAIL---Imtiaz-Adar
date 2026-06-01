@@ -145,7 +145,7 @@ class EmailAgent:
                 # Still mark as "connected" for demo purposes
                 self.gmail_user = email
                 self.gmail_app_password = clean_password
-                self.use_app_password = False  # Mark as not fully connected
+                self.use_app_password = False
                 return True, "✅ AI Agent ready! (Gmail sending may be limited on Render)"
             
             self.gmail_user = email
@@ -154,20 +154,183 @@ class EmailAgent:
             
             return True, "✅ Gmail connected successfully!"
         except Exception as e:
-            # Don't fail the whole app if Gmail doesn't connect
             return True, f"⚠️ AI Agent ready, but Gmail connection failed: {str(e)[:100]}"
+    
+    def send_email(self, to: str, subject: str, body: str, thread_id: str = None):
+        """Send email"""
+        if not self.use_app_password:
+            # Demo mode - just pretend it worked
+            return True, "Demo mode: Email would be sent here"
+        
+        try:
+            msg = MIMEMultipart()
+            msg['From'] = self.gmail_user
+            msg['To'] = to
+            msg['Subject'] = subject
+            msg.attach(MIMEText(body, 'plain'))
+            
+            server = smtplib.SMTP('smtp.gmail.com', 587, timeout=10)
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(self.gmail_user, self.gmail_app_password)
+            server.send_message(msg)
+            server.quit()
+            
+            return True, "Email sent successfully!"
+        except Exception as e:
+            return False, f"Failed to send: {str(e)}"
+    
+    def get_unread_emails(self, max_results: int = 10) -> List[Dict]:
+        """Get unread emails - returns demo emails if not connected"""
+        if not self.use_app_password:
+            # Return demo emails
+            return [
+                {
+                    'from': 'recruiter@techcompany.com',
+                    'subject': 'Interview Opportunity for AI Engineer',
+                    'body': 'We were impressed with your portfolio...',
+                    'message_id': 'demo1',
+                    'thread_id': 'demo1',
+                    'date': '2024-01-15'
+                },
+                {
+                    'from': 'client@startup.io',
+                    'subject': 'Question about your services',
+                    'body': 'Can you tell me more about your AI solutions?',
+                    'message_id': 'demo2',
+                    'thread_id': 'demo2',
+                    'date': '2024-01-14'
+                },
+                {
+                    'from': 'team@company.com',
+                    'subject': 'Project Update Request',
+                    'body': 'Could you provide an update on the project?',
+                    'message_id': 'demo3',
+                    'thread_id': 'demo3',
+                    'date': '2024-01-13'
+                }
+            ]
+        
+        try:
+            imap = imaplib.IMAP4_SSL('imap.gmail.com', 993, timeout=10)
+            imap.login(self.gmail_user, self.gmail_app_password)
+            imap.select('INBOX')
+            
+            status, messages = imap.search(None, 'UNSEEN')
+            
+            if status != 'OK':
+                return []
+            
+            email_ids = messages[0].split()
+            email_ids = email_ids[:max_results]
+            
+            emails = []
+            
+            for email_id in email_ids:
+                if email_id.decode() in self.processed_emails:
+                    continue
+                
+                status, msg_data = imap.fetch(email_id, '(RFC822)')
+                
+                if status != 'OK':
+                    continue
+                
+                for response_part in msg_data:
+                    if isinstance(response_part, tuple):
+                        msg = email.message_from_bytes(response_part[1])
+                        
+                        subject, encoding = decode_header(msg['Subject'])[0]
+                        if isinstance(subject, bytes):
+                            subject = subject.decode(encoding if encoding else 'utf-8')
+                        
+                        from_addr = msg['From']
+                        date = msg['Date']
+                        
+                        body = ""
+                        if msg.is_multipart():
+                            for part in msg.walk():
+                                if part.get_content_type() == "text/plain":
+                                    body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                                    break
+                        else:
+                            body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
+                        
+                        email_data = {
+                            'from': from_addr,
+                            'subject': subject if subject else "No Subject",
+                            'body': body[:5000],
+                            'message_id': email_id.decode(),
+                            'thread_id': email_id.decode(),
+                            'date': date
+                        }
+                        
+                        emails.append(email_data)
+                        self.processed_emails.add(email_id.decode())
+            
+            imap.close()
+            imap.logout()
+            
+            return emails
+            
+        except Exception as e:
+            st.error(f"Error fetching emails: {e}")
+            return []
+    
+    def mark_as_read(self, message_id: str):
+        """Mark email as read"""
+        if not self.use_app_password:
+            return
+        
+        try:
+            imap = imaplib.IMAP4_SSL('imap.gmail.com', 993, timeout=10)
+            imap.login(self.gmail_user, self.gmail_app_password)
+            imap.select('INBOX')
+            imap.store(message_id, '+FLAGS', '\\Seen')
+            imap.close()
+            imap.logout()
+        except Exception as e:
+            pass
+    
+    def generate_ai_reply(self, email_data: Dict) -> str:
+        if not self.model:
+            return "AI model not initialized."
+            
+        prompt = f"""
+You are a professional email assistant. Generate a polite, helpful reply.
+
+Original Email:
+From: {email_data['from']}
+Subject: {email_data['subject']}
+Body: {email_data['body'][:1000]}
+
+Requirements:
+1. Acknowledge the message
+2. Answer any questions
+3. Be concise (2-4 sentences)
+4. Professional and friendly
+
+Reply:
+"""
+        try:
+            response = self.model.generate_content(prompt)
+            return response.text.strip()
+        except Exception as e:
+            return f"Thank you for your email. We'll get back to you soon.\n\n(Note: AI generation error: {str(e)})"
 
 def main():
     from PIL import Image
-    icon = Image.open("globe.png")
-
-    col1, col2 = st.columns([1, 2])
-
-    with col1:
-        st.image(icon, width=60)
-
-    with col2:
-        st.title("AI Email Agent")
+    
+    try:
+        icon = Image.open("globe.png")
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            st.image(icon, width=60)
+        with col2:
+            st.title("AI Email Agent")
+    except:
+        st.title("🤖 AI Email Agent")
+    
     st.markdown("*Automate your email related operations with Gemini*")
     st.markdown("""
 <div style='color: #666;'>
@@ -211,13 +374,11 @@ def main():
             else:
                 with st.spinner("Initializing AI Agent..."):
                     try:
-                        # First, just initialize the AI model (fast)
                         st.session_state.agent = EmailAgent(gemini_key)
                         st.success(f"✅ AI Agent initialized with {st.session_state.agent.model_name}")
                         
-                        # Then try Gmail connection separately (with timeout)
                         if gmail_email and gmail_app_password:
-                            st.info("🔌 Attempting Gmail connection (this may take a few seconds)...")
+                            st.info("🔌 Attempting Gmail connection...")
                             success, message = st.session_state.agent.authenticate_with_app_password(
                                 gmail_email, 
                                 gmail_app_password
@@ -229,25 +390,24 @@ def main():
                                 st.warning(message)
                                 st.session_state.gmail_connected = False
                         else:
-                            st.info("💡 Gmail not configured. Using AI-only mode.")
+                            st.info("💡 Gmail not configured. Using AI-only mode with demo emails.")
                             st.session_state.gmail_connected = False
                         
                         st.session_state.initialized = True
                         
                     except Exception as e:
                         st.error(f"Initialization failed: {e}")
-                        st.session_state.initialized = True  # Still mark as initialized so UI shows
+                        st.session_state.initialized = True
         
         if hasattr(st.session_state, 'initialized') and st.session_state.initialized:
             st.markdown("---")
             st.header("Stats")
             if hasattr(st.session_state, 'agent'):
-                st.metric("Processed Emails", len(st.session_state.agent.processed_emails))
                 st.metric("Model", st.session_state.agent.model_name)
             if hasattr(st.session_state, 'gmail_connected') and st.session_state.gmail_connected:
                 st.success("✅ Gmail Connected")
             else:
-                st.info("⚡ AI Mode Only - Gmail features limited")
+                st.info("⚡ Demo Mode - Using sample emails")
     
     if not hasattr(st.session_state, 'initialized') or not st.session_state.initialized:
         st.info("👈 Please enter your Gemini API Key and click 'Initialize Agent'")
@@ -278,97 +438,70 @@ def main():
     with tab1:
         st.header("Email Inbox")
         
-        if not hasattr(st.session_state, 'gmail_connected') or not st.session_state.gmail_connected:
-            st.info("""
-            ### 📧 Gmail Inbox Preview
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            if st.button("Fetch Unread Emails", use_container_width=True):
+                with st.spinner("Fetching emails..."):
+                    st.session_state.emails = st.session_state.agent.get_unread_emails(max_emails)
+                    st.rerun()
+        
+        if hasattr(st.session_state, 'emails') and st.session_state.emails:
+            st.success(f"📬 Found {len(st.session_state.emails)} email(s)")
             
-            To see your real inbox:
-            1. Configure Gmail credentials in sidebar
-            2. Re-initialize the agent
-            3. Click 'Fetch Unread Emails'
-            
-            **Current Mode:** AI-Only (all playground features work!)
-            """)
-            
-            # Show demo emails
-            st.subheader("📬 Demo: How Inbox Would Look")
-            demo_emails = [
-                {"from": "recruiter@company.com", "subject": "Interview Opportunity", "date": "2024-01-15"},
-                {"from": "client@business.com", "subject": "Project Update Request", "date": "2024-01-14"},
-                {"from": "team@startup.io", "subject": "Weekly Sync Meeting", "date": "2024-01-13"},
-            ]
-            for email in demo_emails:
-                st.markdown(f"""
-                <div class="email-card">
-                    <strong>📨 From:</strong> {email['from']}<br>
-                    <strong>📌 Subject:</strong> {email['subject']}<br>
-                    <strong>📅 Date:</strong> {email['date']}
-                </div>
-                """, unsafe_allow_html=True)
-        else:
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                if st.button("Fetch Unread Emails", use_container_width=True):
-                    with st.spinner("Fetching emails..."):
-                        st.session_state.emails = st.session_state.agent.get_unread_emails(max_emails)
-                        st.rerun()
-            
-            if hasattr(st.session_state, 'emails') and st.session_state.emails:
-                st.success(f"📬 Found {len(st.session_state.emails)} unread email(s)")
-                
-                for idx, email in enumerate(st.session_state.emails):
-                    with st.container():
-                        st.markdown(f"""
-                        <div class="email-card">
-                            <strong>📨 From:</strong> {email['from']}<br>
-                            <strong>📌 Subject:</strong> {email['subject']}<br>
-                            <strong>📅 Date:</strong> {email.get('date', 'Unknown')}
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-                        with st.expander("📝 View Email Body"):
-                            st.text(email['body'][:500] + "..." if len(email['body']) > 500 else email['body'])
-                        
-                        col1, col2, col3 = st.columns(3)
-                        
-                        with col1:
-                            if st.button(f"🤖 Generate AI Reply", key=f"gen_{idx}"):
-                                with st.spinner("Generating AI response..."):
-                                    reply = st.session_state.agent.generate_ai_reply(email)
-                                    st.session_state[f"reply_{idx}"] = reply
-                                    st.success("✅ Reply generated!")
-                        
-                        with col2:
-                            if st.button(f"📤 Send Reply", key=f"send_{idx}"):
-                                if f"reply_{idx}" in st.session_state:
-                                    success, result = st.session_state.agent.send_email(
-                                        to=email['from'],
-                                        subject=f"Re: {email['subject']}",
-                                        body=st.session_state[f"reply_{idx}"],
-                                        thread_id=email['thread_id']
-                                    )
-                                    if success:
-                                        st.success(f"✅ Reply sent to {email['from']}")
+            for idx, email in enumerate(st.session_state.emails):
+                with st.container():
+                    st.markdown(f"""
+                    <div class="email-card">
+                        <strong>📨 From:</strong> {email['from']}<br>
+                        <strong>📌 Subject:</strong> {email['subject']}<br>
+                        <strong>📅 Date:</strong> {email.get('date', 'Unknown')}
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    with st.expander("📝 View Email Body"):
+                        st.text(email['body'][:500] + "..." if len(email['body']) > 500 else email['body'])
+                    
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        if st.button(f"🤖 Generate AI Reply", key=f"gen_{idx}"):
+                            with st.spinner("Generating AI response..."):
+                                reply = st.session_state.agent.generate_ai_reply(email)
+                                st.session_state[f"reply_{idx}"] = reply
+                                st.success("✅ Reply generated!")
+                    
+                    with col2:
+                        if st.button(f"📤 Send Reply", key=f"send_{idx}"):
+                            if f"reply_{idx}" in st.session_state:
+                                success, result = st.session_state.agent.send_email(
+                                    to=email['from'],
+                                    subject=f"Re: {email['subject']}",
+                                    body=st.session_state[f"reply_{idx}"]
+                                )
+                                if success:
+                                    st.success(f"✅ {result}")
+                                    if hasattr(st.session_state, 'gmail_connected') and st.session_state.gmail_connected:
                                         st.session_state.agent.mark_as_read(email['message_id'])
-                                        st.rerun()
-                                    else:
-                                        st.error(f"Failed to send: {result}")
+                                    st.rerun()
                                 else:
-                                    st.warning("Generate reply first")
-                        
-                        with col3:
-                            if st.button(f"✓ Mark as Read", key=f"read_{idx}"):
+                                    st.error(f"Failed to send: {result}")
+                            else:
+                                st.warning("Generate reply first")
+                    
+                    with col3:
+                        if st.button(f"✓ Mark as Read", key=f"read_{idx}"):
+                            if hasattr(st.session_state, 'gmail_connected') and st.session_state.gmail_connected:
                                 st.session_state.agent.mark_as_read(email['message_id'])
-                                st.success("Marked as read")
-                                st.rerun()
-                        
-                        if f"reply_{idx}" in st.session_state:
-                            st.markdown("### 🤖 AI Generated Reply:")
-                            st.info(st.session_state[f"reply_{idx}"])
-                        
-                        st.markdown("---")
-            else:
-                st.info("Click 'Fetch Unread Emails' to check your inbox")
+                            st.success("Marked as read")
+                            st.rerun()
+                    
+                    if f"reply_{idx}" in st.session_state:
+                        st.markdown("### 🤖 AI Generated Reply:")
+                        st.info(st.session_state[f"reply_{idx}"])
+                    
+                    st.markdown("---")
+        else:
+            st.info("Click 'Fetch Unread Emails' to see emails (demo emails shown if Gmail not connected)")
     
     with tab2:
         st.header("✍️ Compose New Email")
@@ -397,18 +530,14 @@ def main():
         
         if st.button("📤 Send Email", type="primary", use_container_width=True):
             if recipient and subject and body:
-                if hasattr(st.session_state, 'gmail_connected') and st.session_state.gmail_connected:
-                    success, result = st.session_state.agent.send_email(recipient, subject, body)
-                    if success:
-                        st.success(f"✅ Email sent successfully to {recipient}")
-                        st.balloons()
-                        st.session_state.ai_body = ""
-                        st.rerun()
-                    else:
-                        st.error(f"Failed to send: {result}")
+                success, result = st.session_state.agent.send_email(recipient, subject, body)
+                if success:
+                    st.success(f"✅ {result}")
+                    st.balloons()
+                    st.session_state.ai_body = ""
+                    st.rerun()
                 else:
-                    st.info("💡 Gmail not connected - Email preview only")
-                    st.code(f"To: {recipient}\nSubject: {subject}\n\n{body}")
+                    st.error(f"Failed to send: {result}")
             else:
                 st.warning("Please fill all fields")
     
@@ -555,14 +684,14 @@ ONLY return the JSON, nothing else.
             
             with col2:
                 st.subheader("Email Statistics")
-                st.metric("Total Unread", len(df))
+                st.metric("Total Emails", len(df))
                 st.metric("Unique Senders", df['from'].nunique())
                 st.metric("Avg Subject Length", int(df['subject'].str.len().mean()) if len(df) > 0 else 0)
             
             st.subheader("Recent Emails")
             st.dataframe(df[['from', 'subject', 'date']], use_container_width=True)
         else:
-            st.info("Connect Gmail and fetch emails to see analytics")
+            st.info("Click 'Fetch Unread Emails' to see analytics")
 
 if __name__ == "__main__":
     main()
