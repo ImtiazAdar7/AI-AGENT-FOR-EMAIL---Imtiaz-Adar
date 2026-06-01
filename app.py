@@ -118,60 +118,27 @@ class EmailAgent:
             st.error(f"Model initialization failed: {e}")
             raise
     
-    # def authenticate_with_app_password(self, email: str, app_password: str):
-    #     """Authenticate using App Password (works on Render!)"""
-    #     try:
-    #         # Remove spaces from app password
-    #         clean_password = app_password.replace(" ", "")
-            
-    #         # Test SMTP connection
-    #         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-    #             server.login(email, clean_password)
-            
-    #         # Test IMAP connection for reading emails
-    #         imap = imaplib.IMAP4_SSL('imap.gmail.com')
-    #         imap.login(email, clean_password)
-    #         imap.close()
-            
-    #         self.gmail_user = email
-    #         self.gmail_app_password = clean_password
-    #         self.use_app_password = True
-            
-    #         return True, "✅ Gmail connected successfully with App Password!"
-    #     except Exception as e:
-    #         return False, f"❌ Authentication failed: {str(e)}"
     def authenticate_with_app_password(self, email: str, app_password: str):
         """Authenticate using App Password with alternative ports"""
         try:
             clean_password = app_password.replace(" ", "")
             
-            # Try ALL possible SMTP configurations
-            smtp_configs = [
-                ('smtp.gmail.com', 587, 'tls'),
-                ('smtp.gmail.com', 465, 'ssl'),
-            ]
-            
-            smtp_success = False
-            
-            for host, port, security in smtp_configs:
+            # Try port 587 with STARTTLS first (most compatible)
+            try:
+                server = smtplib.SMTP('smtp.gmail.com', 587)
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                server.login(email, clean_password)
+                server.quit()
+            except Exception as e1:
+                # Try port 465 with SSL as fallback
                 try:
-                    if security == 'tls':
-                        server = smtplib.SMTP(host, port)
-                        server.ehlo()
-                        server.starttls()
-                        server.ehlo()
-                    else:
-                        server = smtplib.SMTP_SSL(host, port)
-                    
+                    server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
                     server.login(email, clean_password)
                     server.quit()
-                    smtp_success = True
-                    break
-                except:
-                    continue
-            
-            if not smtp_success:
-                return False, "Cannot connect to Gmail SMTP. Please check your App Password or Render network settings."
+                except Exception as e2:
+                    return False, f"Cannot connect to Gmail SMTP. Error: {str(e2)}"
             
             # Try IMAP for reading emails
             try:
@@ -179,7 +146,7 @@ class EmailAgent:
                 imap.login(email, clean_password)
                 imap.close()
             except:
-                pass  # IMAP might fail but sending may still work
+                pass  # IMAP might be blocked but sending may still work
             
             self.gmail_user = email
             self.gmail_app_password = clean_password
@@ -202,9 +169,21 @@ class EmailAgent:
             
             msg.attach(MIMEText(body, 'plain'))
             
-            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            # Try port 587 first
+            try:
+                server = smtplib.SMTP('smtp.gmail.com', 587)
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
                 server.login(self.gmail_user, self.gmail_app_password)
                 server.send_message(msg)
+                server.quit()
+            except:
+                # Fallback to port 465
+                server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+                server.login(self.gmail_user, self.gmail_app_password)
+                server.send_message(msg)
+                server.quit()
             
             return True, "Email sent successfully!"
         except Exception as e:
@@ -216,11 +195,10 @@ class EmailAgent:
             return []
         
         try:
-            imap = imaplib.IMAP4_SSL('imap.gmail.com')
+            imap = imaplib.IMAP4_SSL('imap.gmail.com', 993)
             imap.login(self.gmail_user, self.gmail_app_password)
             imap.select('INBOX')
             
-            # Search for unread emails
             status, messages = imap.search(None, 'UNSEEN')
             
             if status != 'OK':
@@ -244,18 +222,13 @@ class EmailAgent:
                     if isinstance(response_part, tuple):
                         msg = email.message_from_bytes(response_part[1])
                         
-                        # Decode subject
                         subject, encoding = decode_header(msg['Subject'])[0]
                         if isinstance(subject, bytes):
                             subject = subject.decode(encoding if encoding else 'utf-8')
                         
-                        # Get sender
                         from_addr = msg['From']
-                        
-                        # Get date
                         date = msg['Date']
                         
-                        # Get body
                         body = ""
                         if msg.is_multipart():
                             for part in msg.walk():
@@ -292,7 +265,7 @@ class EmailAgent:
             return
         
         try:
-            imap = imaplib.IMAP4_SSL('imap.gmail.com')
+            imap = imaplib.IMAP4_SSL('imap.gmail.com', 993)
             imap.login(self.gmail_user, self.gmail_app_password)
             imap.select('INBOX')
             imap.store(message_id, '+FLAGS', '\\Seen')
@@ -529,7 +502,6 @@ def main():
                         st.session_state.agent = EmailAgent(gemini_key)
                         st.success(f"✅ AI Agent initialized with {st.session_state.agent.model_name}")
                         
-                        # Try to connect Gmail if credentials provided
                         if gmail_email and gmail_app_password:
                             success, message = st.session_state.agent.authenticate_with_app_password(
                                 gmail_email, 
