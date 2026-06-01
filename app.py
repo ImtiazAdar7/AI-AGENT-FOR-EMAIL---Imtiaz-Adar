@@ -1,5 +1,5 @@
 """
-Project: AI Email Agent
+Project: AI Email Agent - Cloud Version
 Author: Imtiaz Adar
 Contact: imtiazadarofficial@gmail.com
 """
@@ -119,15 +119,43 @@ class EmailAgent:
             st.error(f"Model initialization failed: {e}")
             raise
 
+    def authenticate_gmail(self, credentials_file: str = 'credentials.json'):
+        """Original OAuth method - kept for local use"""
+        if os.environ.get('RENDER') or os.environ.get('STREAMLIT_CLOUD'):
+            self.service = None
+            return False, "Cloud mode: Use App Password method instead."
+        
+        creds = None
+        token_file = 'token.pickle'
+        
+        if Path(token_file).exists():
+            with open(token_file, 'rb') as token:
+                creds = pickle.load(token)
+        
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                if not Path(credentials_file).exists():
+                    return False, "credentials.json not found."
+                
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    credentials_file, self.SCOPES)
+                creds = flow.run_local_server(port=0)
+            
+            with open(token_file, 'wb') as token:
+                pickle.dump(creds, token)
+        
+        self.service = build('gmail', 'v1', credentials=creds)
+        return True, "Authenticated successfully!"
+
     def authenticate_with_app_password(self, email: str, app_password: str):
-        """Authenticate using App Password with timeout"""
+        """Authenticate using App Password for cloud deployment"""
         try:
             clean_password = app_password.replace(" ", "")
-            
-            # Set socket timeout to prevent hanging
             socket.setdefaulttimeout(10)
             
-            # Try port 587 with STARTTLS
+            # Test SMTP connection
             try:
                 server = smtplib.SMTP('smtp.gmail.com', 587, timeout=10)
                 server.ehlo()
@@ -135,18 +163,10 @@ class EmailAgent:
                 server.ehlo()
                 server.login(email, clean_password)
                 server.quit()
-                smtp_worked = True
-            except Exception as e:
-                smtp_worked = False
-                st.warning(f"SMTP connection failed (this is normal on Render): {str(e)[:100]}")
-            
-            # Don't let Gmail failure stop the app
-            if not smtp_worked:
-                # Still mark as "connected" for demo purposes
-                self.gmail_user = email
-                self.gmail_app_password = clean_password
-                self.use_app_password = False
-                return True, "✅ AI Agent ready! (Gmail sending may be limited on Render)"
+            except:
+                server = smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10)
+                server.login(email, clean_password)
+                server.quit()
             
             self.gmail_user = email
             self.gmail_app_password = clean_password
@@ -154,143 +174,56 @@ class EmailAgent:
             
             return True, "✅ Gmail connected successfully!"
         except Exception as e:
-            return True, f"⚠️ AI Agent ready, but Gmail connection failed: {str(e)[:100]}"
+            return False, f"❌ Authentication failed: {str(e)[:100]}"
     
-    def send_email(self, to: str, subject: str, body: str, thread_id: str = None):
-        """Send email"""
-        if not self.use_app_password:
-            # Demo mode - just pretend it worked
-            return True, "Demo mode: Email would be sent here"
+    def extract_email_content(self, message: Dict) -> Dict:
+        headers = message['payload']['headers']
         
-        try:
-            msg = MIMEMultipart()
-            msg['From'] = self.gmail_user
-            msg['To'] = to
-            msg['Subject'] = subject
-            msg.attach(MIMEText(body, 'plain'))
-            
-            server = smtplib.SMTP('smtp.gmail.com', 587, timeout=10)
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(self.gmail_user, self.gmail_app_password)
-            server.send_message(msg)
-            server.quit()
-            
-            return True, "Email sent successfully!"
-        except Exception as e:
-            return False, f"Failed to send: {str(e)}"
+        email_data = {
+            'from': '',
+            'subject': '',
+            'body': '',
+            'message_id': message['id'],
+            'thread_id': message['threadId'],
+            'date': ''
+        }
+        
+        for header in headers:
+            if header['name'].lower() == 'from':
+                email_data['from'] = header['value']
+            elif header['name'].lower() == 'subject':
+                email_data['subject'] = header['value']
+            elif header['name'].lower() == 'date':
+                email_data['date'] = header['value']
+        
+        if 'parts' in message['payload']:
+            body_data = self._get_body_from_parts(message['payload']['parts'])
+            email_data['body'] = self._clean_html(body_data)
+        else:
+            body_data = message['payload'].get('body', {}).get('data', '')
+            if body_data:
+                body_text = base64.urlsafe_b64decode(body_data).decode('utf-8')
+                email_data['body'] = self._clean_html(body_text)
+        
+        return email_data
     
-    def get_unread_emails(self, max_results: int = 10) -> List[Dict]:
-        """Get unread emails - returns demo emails if not connected"""
-        if not self.use_app_password:
-            # Return demo emails
-            return [
-                {
-                    'from': 'recruiter@techcompany.com',
-                    'subject': 'Interview Opportunity for AI Engineer',
-                    'body': 'We were impressed with your portfolio...',
-                    'message_id': 'demo1',
-                    'thread_id': 'demo1',
-                    'date': '2024-01-15'
-                },
-                {
-                    'from': 'client@startup.io',
-                    'subject': 'Question about your services',
-                    'body': 'Can you tell me more about your AI solutions?',
-                    'message_id': 'demo2',
-                    'thread_id': 'demo2',
-                    'date': '2024-01-14'
-                },
-                {
-                    'from': 'team@company.com',
-                    'subject': 'Project Update Request',
-                    'body': 'Could you provide an update on the project?',
-                    'message_id': 'demo3',
-                    'thread_id': 'demo3',
-                    'date': '2024-01-13'
-                }
-            ]
-        
-        try:
-            imap = imaplib.IMAP4_SSL('imap.gmail.com', 993, timeout=10)
-            imap.login(self.gmail_user, self.gmail_app_password)
-            imap.select('INBOX')
-            
-            status, messages = imap.search(None, 'UNSEEN')
-            
-            if status != 'OK':
-                return []
-            
-            email_ids = messages[0].split()
-            email_ids = email_ids[:max_results]
-            
-            emails = []
-            
-            for email_id in email_ids:
-                if email_id.decode() in self.processed_emails:
-                    continue
-                
-                status, msg_data = imap.fetch(email_id, '(RFC822)')
-                
-                if status != 'OK':
-                    continue
-                
-                for response_part in msg_data:
-                    if isinstance(response_part, tuple):
-                        msg = email.message_from_bytes(response_part[1])
-                        
-                        subject, encoding = decode_header(msg['Subject'])[0]
-                        if isinstance(subject, bytes):
-                            subject = subject.decode(encoding if encoding else 'utf-8')
-                        
-                        from_addr = msg['From']
-                        date = msg['Date']
-                        
-                        body = ""
-                        if msg.is_multipart():
-                            for part in msg.walk():
-                                if part.get_content_type() == "text/plain":
-                                    body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                                    break
-                        else:
-                            body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
-                        
-                        email_data = {
-                            'from': from_addr,
-                            'subject': subject if subject else "No Subject",
-                            'body': body[:5000],
-                            'message_id': email_id.decode(),
-                            'thread_id': email_id.decode(),
-                            'date': date
-                        }
-                        
-                        emails.append(email_data)
-                        self.processed_emails.add(email_id.decode())
-            
-            imap.close()
-            imap.logout()
-            
-            return emails
-            
-        except Exception as e:
-            st.error(f"Error fetching emails: {e}")
-            return []
+    def _get_body_from_parts(self, parts: List, body_text: str = '') -> str:
+        for part in parts:
+            if part.get('mimeType') == 'text/plain' and 'data' in part.get('body', {}):
+                data = part['body']['data']
+                decoded = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
+                body_text += decoded
+            elif part.get('mimeType') == 'text/html' and 'data' in part.get('body', {}):
+                data = part['body']['data']
+                decoded = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
+                body_text += decoded
+            elif 'parts' in part:
+                body_text = self._get_body_from_parts(part['parts'], body_text)
+        return body_text
     
-    def mark_as_read(self, message_id: str):
-        """Mark email as read"""
-        if not self.use_app_password:
-            return
-        
-        try:
-            imap = imaplib.IMAP4_SSL('imap.gmail.com', 993, timeout=10)
-            imap.login(self.gmail_user, self.gmail_app_password)
-            imap.select('INBOX')
-            imap.store(message_id, '+FLAGS', '\\Seen')
-            imap.close()
-            imap.logout()
-        except Exception as e:
-            pass
+    def _clean_html(self, html_text: str) -> str:
+        soup = BeautifulSoup(html_text, 'html.parser')
+        return soup.get_text(separator='\n', strip=True)
     
     def generate_ai_reply(self, email_data: Dict) -> str:
         if not self.model:
@@ -317,6 +250,204 @@ Reply:
             return response.text.strip()
         except Exception as e:
             return f"Thank you for your email. We'll get back to you soon.\n\n(Note: AI generation error: {str(e)})"
+    
+    def send_email(self, to: str, subject: str, body: str, thread_id: str = None):
+        """Send email - works with both OAuth and App Password"""
+        # Use App Password method if available
+        if self.use_app_password:
+            try:
+                msg = MIMEMultipart()
+                msg['From'] = self.gmail_user
+                msg['To'] = to
+                msg['Subject'] = subject
+                msg.attach(MIMEText(body, 'plain'))
+                
+                try:
+                    server = smtplib.SMTP('smtp.gmail.com', 587, timeout=10)
+                    server.ehlo()
+                    server.starttls()
+                    server.ehlo()
+                    server.login(self.gmail_user, self.gmail_app_password)
+                    server.send_message(msg)
+                    server.quit()
+                except:
+                    server = smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10)
+                    server.login(self.gmail_user, self.gmail_app_password)
+                    server.send_message(msg)
+                    server.quit()
+                
+                return True, "Email sent successfully!"
+            except Exception as e:
+                return False, f"Failed to send: {str(e)}"
+        
+        # Use OAuth method
+        if not self.service:
+            return False, "Gmail not connected."
+        
+        try:
+            message = self._create_message(to, subject, body)
+            
+            if thread_id:
+                result = self.service.users().messages().send(
+                    userId='me', 
+                    body={'raw': message, 'threadId': thread_id}
+                ).execute()
+            else:
+                result = self.service.users().messages().send(
+                    userId='me', 
+                    body={'raw': message}
+                ).execute()
+            
+            return True, result['id']
+        except HttpError as error:
+            return False, str(error)
+    
+    def _create_message(self, to: str, subject: str, body: str) -> str:
+        message_text = f"""To: {to}
+Subject: {subject}
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+{body}
+"""
+        return base64.urlsafe_b64encode(message_text.encode('utf-8')).decode('utf-8')
+    
+    def get_unread_emails(self, max_results: int = 10) -> List[Dict]:
+        """Fetch unread emails - works with both OAuth and App Password"""
+        
+        # Use App Password method if available
+        if self.use_app_password:
+            try:
+                imap = imaplib.IMAP4_SSL('imap.gmail.com', 993, timeout=10)
+                imap.login(self.gmail_user, self.gmail_app_password)
+                imap.select('INBOX')
+                
+                status, messages = imap.search(None, 'UNSEEN')
+                
+                if status != 'OK':
+                    return []
+                
+                email_ids = messages[0].split()
+                email_ids = email_ids[:max_results]
+                
+                emails = []
+                
+                for email_id in email_ids:
+                    if email_id.decode() in self.processed_emails:
+                        continue
+                    
+                    status, msg_data = imap.fetch(email_id, '(RFC822)')
+                    
+                    if status != 'OK':
+                        continue
+                    
+                    for response_part in msg_data:
+                        if isinstance(response_part, tuple):
+                            msg = email.message_from_bytes(response_part[1])
+                            
+                            subject, encoding = decode_header(msg['Subject'])[0]
+                            if isinstance(subject, bytes):
+                                subject = subject.decode(encoding if encoding else 'utf-8')
+                            
+                            from_addr = msg['From']
+                            date = msg['Date']
+                            
+                            body = ""
+                            if msg.is_multipart():
+                                for part in msg.walk():
+                                    if part.get_content_type() == "text/plain":
+                                        body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                                        break
+                            else:
+                                body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
+                            
+                            email_data = {
+                                'from': from_addr,
+                                'subject': subject if subject else "No Subject",
+                                'body': body[:5000],
+                                'message_id': email_id.decode(),
+                                'thread_id': email_id.decode(),
+                                'date': date
+                            }
+                            
+                            emails.append(email_data)
+                            self.processed_emails.add(email_id.decode())
+                
+                imap.close()
+                imap.logout()
+                
+                return emails
+                
+            except Exception as e:
+                st.error(f"Error fetching emails: {e}")
+                return []
+        
+        # Use OAuth method
+        if not self.service:
+            return []
+        
+        try:
+            results = self.service.users().messages().list(
+                userId='me', 
+                labelIds=['INBOX'],
+                q='is:unread',
+                maxResults=max_results
+            ).execute()
+            
+            messages = results.get('messages', [])
+            
+            if not messages:
+                return []
+            
+            emails = []
+            for msg in messages:
+                if msg['id'] in self.processed_emails:
+                    continue
+                    
+                msg_data = self.service.users().messages().get(
+                    userId='me', 
+                    id=msg['id'],
+                    format='full'
+                ).execute()
+                
+                email_content = self.extract_email_content(msg_data)
+                emails.append(email_content)
+                self.processed_emails.add(msg['id'])
+            
+            return emails
+            
+        except HttpError as error:
+            st.error(f"Error fetching emails: {error}")
+            return []
+    
+    def mark_as_read(self, message_id: str):
+        """Mark email as read - works with both OAuth and App Password"""
+        
+        # Use App Password method if available
+        if self.use_app_password:
+            try:
+                imap = imaplib.IMAP4_SSL('imap.gmail.com', 993, timeout=10)
+                imap.login(self.gmail_user, self.gmail_app_password)
+                imap.select('INBOX')
+                imap.store(message_id, '+FLAGS', '\\Seen')
+                imap.close()
+                imap.logout()
+            except Exception as e:
+                pass
+            return
+        
+        # Use OAuth method
+        if not self.service:
+            return
+        
+        try:
+            self.service.users().messages().modify(
+                userId='me',
+                id=message_id,
+                body={'removeLabelIds': ['UNREAD']}
+            ).execute()
+        except HttpError as error:
+            st.error(f"Error marking as read: {error}")
 
 def main():
     from PIL import Image
@@ -383,21 +514,20 @@ def main():
                                 gmail_email, 
                                 gmail_app_password
                             )
-                            if "✅" in message:
+                            if success:
                                 st.success(message)
                                 st.session_state.gmail_connected = True
                             else:
                                 st.warning(message)
                                 st.session_state.gmail_connected = False
                         else:
-                            st.info("💡 Gmail not configured. Using AI-only mode with demo emails.")
+                            st.info("💡 Gmail not configured. Using AI-only mode.")
                             st.session_state.gmail_connected = False
                         
                         st.session_state.initialized = True
                         
                     except Exception as e:
                         st.error(f"Initialization failed: {e}")
-                        st.session_state.initialized = True
         
         if hasattr(st.session_state, 'initialized') and st.session_state.initialized:
             st.markdown("---")
@@ -407,7 +537,7 @@ def main():
             if hasattr(st.session_state, 'gmail_connected') and st.session_state.gmail_connected:
                 st.success("✅ Gmail Connected")
             else:
-                st.info("⚡ Demo Mode - Using sample emails")
+                st.info("⚡ AI Mode Only - Add Gmail for full features")
     
     if not hasattr(st.session_state, 'initialized') or not st.session_state.initialized:
         st.info("👈 Please enter your Gemini API Key and click 'Initialize Agent'")
@@ -426,10 +556,10 @@ def main():
             - Create professional emails
             - Try the AI Playground!
 
-            ### Step 3: Optional Gmail Integration
+            ### Step 3: Optional Gmail Integration (Works on Render!)
             - Enable 2-Step Verification on Google Account
             - Generate App Password
-            - Enter credentials above
+            - Enter credentials in sidebar
             """)
         return
     
@@ -437,6 +567,18 @@ def main():
     
     with tab1:
         st.header("Email Inbox")
+        
+        if not hasattr(st.session_state, 'gmail_connected') or not st.session_state.gmail_connected:
+            st.info("""
+            ### 📧 Gmail Inbox
+            
+            To see your real inbox:
+            1. Enter your Gmail credentials in the sidebar
+            2. Click 'Initialize Agent' again
+            3. Then click 'Fetch Unread Emails'
+            
+            **Current Mode:** AI-Only (All playground features work!)
+            """)
         
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -501,7 +643,7 @@ def main():
                     
                     st.markdown("---")
         else:
-            st.info("Click 'Fetch Unread Emails' to see emails (demo emails shown if Gmail not connected)")
+            st.info("Click 'Fetch Unread Emails' to check your inbox")
     
     with tab2:
         st.header("✍️ Compose New Email")
@@ -691,7 +833,7 @@ ONLY return the JSON, nothing else.
             st.subheader("Recent Emails")
             st.dataframe(df[['from', 'subject', 'date']], use_container_width=True)
         else:
-            st.info("Click 'Fetch Unread Emails' to see analytics")
+            st.info("Fetch emails to see analytics")
 
 if __name__ == "__main__":
     main()
