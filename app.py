@@ -1,5 +1,5 @@
 """
-Project: AI Email Agent - App Password Version
+Project: AI Email Agent - Complete Inbox Version
 Author: Imtiaz Adar
 Contact: imtiazadarofficial@gmail.com
 """
@@ -61,25 +61,28 @@ class EmailAgent:
         self.is_gmail_connected = False
         
         # Configure Gemini
-        genai.configure(api_key=gemini_api_key)
-        self._initialize_model()
-        
+        try:
+            genai.configure(api_key=gemini_api_key)
+            self._initialize_model()
+        except Exception as e:
+            st.error(f"Gemini configuration failed: {e}")
+            raise
+    
     def _initialize_model(self):
         """Initialize Gemini model"""
         try:
-            # Try different model names
-            models_to_try = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro']
+            working_models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro']
             
-            for model_name in models_to_try:
+            for model_name in working_models:
                 try:
                     self.model = genai.GenerativeModel(model_name)
-                    test_response = self.model.generate_content("Test")
-                    if test_response and test_response.text:
+                    response = self.model.generate_content("Test")
+                    if response and hasattr(response, 'text') and response.text:
                         self.model_name = model_name
                         return
                 except:
                     continue
-            
+                    
             raise Exception("No working Gemini model found")
             
         except Exception as e:
@@ -131,8 +134,8 @@ class EmailAgent:
         except Exception as e:
             return False, f"Failed to send: {str(e)}"
     
-    def get_unread_emails(self, max_results: int = 10) -> List[Dict]:
-        """Fetch unread emails using IMAP"""
+    def get_all_emails(self, max_results: int = 20) -> List[Dict]:
+        """Fetch ALL emails (not just unread) - latest first"""
         if not self.is_gmail_connected:
             return []
         
@@ -141,13 +144,19 @@ class EmailAgent:
             imap.login(self.gmail_user, self.gmail_password)
             imap.select('INBOX')
             
-            status, messages = imap.search(None, 'UNSEEN')
+            # Search for ALL emails (not just UNSEEN)
+            status, messages = imap.search(None, 'ALL')
             
             if status != 'OK':
                 return []
             
+            # Get ALL email IDs (they come in ascending order - oldest first)
+            email_ids = messages[0].split()
+            
+            # Reverse to get newest first, then limit
+            email_ids = email_ids[::-1][:max_results]
+            
             emails = []
-            email_ids = messages[0].split()[:max_results]
             
             for email_id in email_ids:
                 status, msg_data = imap.fetch(email_id, '(RFC822)')
@@ -165,9 +174,95 @@ class EmailAgent:
                         
                         # Get sender
                         from_addr = msg['From']
-                        date = msg['Date']
+                        date_str = msg['Date']
+                        
+                        # Parse date for sorting
+                        try:
+                            # Try to parse email date format
+                            from email.utils import parsedate_to_datetime
+                            date_obj = parsedate_to_datetime(date_str)
+                        except:
+                            date_obj = datetime.now()
                         
                         # Get body
+                        body = ""
+                        if msg.is_multipart():
+                            for part in msg.walk():
+                                if part.get_content_type() == "text/plain":
+                                    body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                                    break
+                        else:
+                            body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
+                        
+                        # Check if email is read
+                        is_read = 'UNSEEN' not in str(msg)
+                        
+                        emails.append({
+                            'from': from_addr,
+                            'subject': subject if subject else "No Subject",
+                            'body': body[:3000],
+                            'message_id': email_id.decode(),
+                            'thread_id': email_id.decode(),
+                            'date': date_str,
+                            'date_obj': date_obj,
+                            'is_read': is_read
+                        })
+            
+            imap.close()
+            imap.logout()
+            
+            # Sort by date (newest first) - double ensure
+            emails.sort(key=lambda x: x['date_obj'], reverse=True)
+            
+            return emails
+            
+        except Exception as e:
+            st.error(f"Error fetching emails: {e}")
+            return []
+    
+    def get_unread_emails(self, max_results: int = 20) -> List[Dict]:
+        """Fetch only unread emails - latest first"""
+        if not self.is_gmail_connected:
+            return []
+        
+        try:
+            imap = imaplib.IMAP4_SSL('imap.gmail.com', 993)
+            imap.login(self.gmail_user, self.gmail_password)
+            imap.select('INBOX')
+            
+            # Search for UNREAD emails
+            status, messages = imap.search(None, 'UNSEEN')
+            
+            if status != 'OK':
+                return []
+            
+            # Get email IDs and reverse for newest first
+            email_ids = messages[0].split()[::-1][:max_results]
+            
+            emails = []
+            
+            for email_id in email_ids:
+                status, msg_data = imap.fetch(email_id, '(RFC822)')
+                if status != 'OK':
+                    continue
+                
+                for response_part in msg_data:
+                    if isinstance(response_part, tuple):
+                        msg = email.message_from_bytes(response_part[1])
+                        
+                        subject, encoding = decode_header(msg['Subject'])[0]
+                        if isinstance(subject, bytes):
+                            subject = subject.decode(encoding if encoding else 'utf-8')
+                        
+                        from_addr = msg['From']
+                        date_str = msg['Date']
+                        
+                        try:
+                            from email.utils import parsedate_to_datetime
+                            date_obj = parsedate_to_datetime(date_str)
+                        except:
+                            date_obj = datetime.now()
+                        
                         body = ""
                         if msg.is_multipart():
                             for part in msg.walk():
@@ -183,11 +278,17 @@ class EmailAgent:
                             'body': body[:3000],
                             'message_id': email_id.decode(),
                             'thread_id': email_id.decode(),
-                            'date': date
+                            'date': date_str,
+                            'date_obj': date_obj,
+                            'is_read': False
                         })
             
             imap.close()
             imap.logout()
+            
+            # Sort by date (newest first)
+            emails.sort(key=lambda x: x['date_obj'], reverse=True)
+            
             return emails
             
         except Exception as e:
@@ -236,6 +337,14 @@ Reply:
         except Exception as e:
             return f"Thank you for your email. We'll get back to you soon."
 
+def parse_email_date(date_str):
+    """Helper to parse email date strings"""
+    try:
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(date_str)
+    except:
+        return datetime.now()
+
 def main():
     st.title("🤖 AI Email Agent")
     st.markdown("*Automate your email operations with Gemini AI*")
@@ -264,21 +373,23 @@ def main():
         )
         
         st.divider()
-        max_emails = st.slider("Max emails to fetch", 1, 30, 10)
+        max_emails = st.slider("Max emails to fetch", 5, 50, 20)
+        
+        # Choose email type
+        email_type = st.radio("Email filter:", ["📬 All Inbox (Latest First)", "🆕 Unread Only"], 
+                             index=0, horizontal=True)
         
         if st.button("🚀 Initialize & Connect", type="primary"):
             if not gemini_key:
-                st.error("Please enter Gemini API Key")
+                st.error("❌ Please enter Gemini API Key")
             elif not gmail_email or not gmail_password:
-                st.error("Please enter Gmail credentials")
+                st.error("❌ Please enter Gmail credentials")
             else:
                 with st.spinner("Initializing AI and connecting to Gmail..."):
                     try:
-                        # Initialize AI
                         st.session_state.agent = EmailAgent(gemini_key)
                         st.success(f"✅ AI Ready! Model: {st.session_state.agent.model_name}")
                         
-                        # Connect Gmail
                         success, msg = st.session_state.agent.connect_gmail(gmail_email, gmail_password)
                         if success:
                             st.success(msg)
@@ -288,6 +399,7 @@ def main():
                             st.session_state.gmail_connected = False
                         
                         st.session_state.initialized = True
+                        st.session_state.email_filter = email_type
                     except Exception as e:
                         st.error(f"Error: {e}")
         
@@ -297,32 +409,33 @@ def main():
             if hasattr(st.session_state, 'gmail_connected') and st.session_state.gmail_connected:
                 st.success("✅ Gmail Connected")
             else:
-                st.error("❌ Gmail Not Connected")
-            if hasattr(st.session_state, 'agent'):
+                st.warning("⚠️ Gmail Not Connected")
+            if hasattr(st.session_state, 'agent') and st.session_state.agent.model_name:
                 st.info(f"🤖 Model: {st.session_state.agent.model_name}")
     
     # Check if initialized
     if not hasattr(st.session_state, 'initialized'):
         st.info("👈 Enter your credentials and click 'Initialize & Connect'")
         
-        with st.expander("📚 Quick Start Guide"):
+        with st.expander("📚 Quick Start Guide", expanded=True):
             st.markdown("""
-            ### Step 1: Get Gemini API Key
+            ### Step 1: Get Gemini API Key (FREE)
             1. Visit [Google AI Studio](https://makersuite.google.com/app/apikey)
             2. Sign in with Google account
             3. Click "Create API Key"
-            4. Copy the key
+            4. Copy the key (starts with AIza...)
             
             ### Step 2: Get Gmail App Password
-            1. Enable 2-Step Verification on your Google Account
-            2. Go to Security → App Passwords
-            3. Select 'Mail' and 'Other'
-            4. Copy the 16-character password (remove spaces when pasting)
+            1. Go to [Google Account Security](https://myaccount.google.com/security)
+            2. Enable **2-Step Verification**
+            3. Go to **App Passwords**
+            4. Select 'Mail' and 'Other'
+            5. Copy the 16-character password
             
             ### Step 3: Connect
             1. Enter both credentials in sidebar
             2. Click "Initialize & Connect"
-            3. Start using AI email features!
+            3. Fetch your inbox and start using AI!
             """)
         return
     
@@ -335,31 +448,63 @@ def main():
         if not hasattr(st.session_state, 'gmail_connected') or not st.session_state.gmail_connected:
             st.warning("⚠️ Gmail not connected. Please check your credentials in sidebar.")
         else:
-            col1, col2 = st.columns([3, 1])
+            # Refresh filter buttons
+            col1, col2, col3 = st.columns([2, 1, 1])
             with col1:
-                if st.button("📬 Fetch Unread Emails", use_container_width=True):
+                filter_option = st.radio("Select view:", ["📬 All Inbox (Latest First)", "🆕 Unread Only"], 
+                                        index=0 if st.session_state.get('email_filter', 'All') == "📬 All Inbox (Latest First)" else 1,
+                                        horizontal=True)
+            
+            with col2:
+                if st.button("🔄 Refresh Inbox", use_container_width=True):
                     with st.spinner("Fetching emails..."):
-                        st.session_state.emails = st.session_state.agent.get_unread_emails(max_emails)
+                        if filter_option == "📬 All Inbox (Latest First)":
+                            st.session_state.emails = st.session_state.agent.get_all_emails(max_emails)
+                        else:
+                            st.session_state.emails = st.session_state.agent.get_unread_emails(max_emails)
+                        st.session_state.email_filter = filter_option
                         st.rerun()
             
+            # Load emails if not present or filter changed
+            if not hasattr(st.session_state, 'emails') or st.session_state.get('email_filter') != filter_option:
+                with st.spinner("Loading your inbox..."):
+                    if filter_option == "📬 All Inbox (Latest First)":
+                        st.session_state.emails = st.session_state.agent.get_all_emails(max_emails)
+                    else:
+                        st.session_state.emails = st.session_state.agent.get_unread_emails(max_emails)
+                    st.session_state.email_filter = filter_option
+            
             if hasattr(st.session_state, 'emails') and st.session_state.emails:
-                st.success(f"📬 Found {len(st.session_state.emails)} unread email(s)")
+                # Show count and unread stats
+                unread_count = sum(1 for e in st.session_state.emails if not e.get('is_read', True))
+                st.success(f"📬 Showing {len(st.session_state.emails)} emails ({unread_count} unread)")
                 
                 for idx, email in enumerate(st.session_state.emails):
-                    with st.expander(f"📧 {email['subject'][:60]} - {email['from'][:40]}"):
-                        st.markdown(f"**From:** {email['from']}")
-                        st.markdown(f"**Date:** {email.get('date', 'Unknown')}")
-                        st.divider()
-                        st.markdown(f"**Body:**\n{email['body'][:800]}")
+                    # Email status indicator
+                    status_icon = "🆕" if not email.get('is_read', True) else "📧"
+                    
+                    with st.expander(f"{status_icon} {email['subject'][:80]} - {email['from'][:50]}"):
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.markdown(f"**From:** {email['from']}")
+                            st.markdown(f"**Date:** {email.get('date', 'Unknown')}")
+                        with col2:
+                            if not email.get('is_read', True):
+                                st.caption("🔴 Unread")
+                            else:
+                                st.caption("✅ Read")
                         
-                        col1, col2, col3 = st.columns(3)
+                        st.divider()
+                        st.markdown(f"**Message:**\n{email['body'][:1000]}")
+                        
+                        col1, col2, col3, col4 = st.columns(4)
                         
                         with col1:
                             if st.button(f"🤖 AI Reply", key=f"reply_{idx}"):
                                 with st.spinner("Generating AI response..."):
                                     reply = st.session_state.agent.generate_ai_reply(email)
                                     st.session_state[f"reply_text_{idx}"] = reply
-                                    st.success("Reply generated!")
+                                    st.success("✅ Reply generated!")
                         
                         if st.session_state.get(f"reply_text_{idx}"):
                             st.text_area("AI Generated Reply:", st.session_state[f"reply_text_{idx}"], 
@@ -375,18 +520,20 @@ def main():
                                     if success:
                                         st.success(msg)
                                         st.balloons()
-                                        st.session_state.agent.mark_as_read(email['message_id'])
+                                        if not email.get('is_read', True):
+                                            st.session_state.agent.mark_as_read(email['message_id'])
                                         st.rerun()
                                     else:
                                         st.error(msg)
                             
                             with col3:
-                                if st.button(f"✓ Mark Read", key=f"read_{idx}"):
-                                    st.session_state.agent.mark_as_read(email['message_id'])
-                                    st.success("Marked as read")
-                                    st.rerun()
+                                if not email.get('is_read', True):
+                                    if st.button(f"✓ Mark Read", key=f"read_{idx}"):
+                                        st.session_state.agent.mark_as_read(email['message_id'])
+                                        st.success("Marked as read")
+                                        st.rerun()
             else:
-                st.info("Click 'Fetch Unread Emails' to check your inbox")
+                st.info("📭 No emails found. Try refreshing or check your connection.")
     
     with tab2:
         st.header("✍️ Compose New Email")
@@ -428,16 +575,16 @@ def main():
     
     with tab3:
         st.header("🤖 AI Playground")
-        st.caption("*Test AI features - no Gmail needed*")
+        st.caption("*Test AI features - works without Gmail*")
         
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("Test Email Reply")
+            st.subheader("📝 Test Email Reply")
             test_email = st.text_area(
                 "Paste an email to test AI reply",
                 height=200,
-                placeholder="Subject: Question about services\n\nHi, I'm interested in your AI services. Can you provide pricing information?"
+                placeholder="Subject: Question about services\n\nHi, I'm interested in your AI services."
             )
             
             if st.button("🤖 Generate Test Reply", use_container_width=True):
@@ -455,11 +602,11 @@ def main():
                     st.warning("Please enter a test email")
         
         with col2:
-            st.subheader("Generate Cold Email")
+            st.subheader("✨ Generate Cold Email")
             topic = st.text_input("What's the email about?", placeholder="Product launch, Meeting request")
             tone = st.selectbox("Tone", ["Professional", "Friendly", "Formal", "Casual"])
             
-            if st.button("✨ Generate Email", use_container_width=True):
+            if st.button("Generate Email", use_container_width=True):
                 if topic:
                     with st.spinner("Crafting email..."):
                         prompt = f"Write a {tone.lower()} email about: {topic}. Keep it concise (3-4 sentences)."
@@ -488,57 +635,22 @@ def main():
             if email_to_analyze:
                 with st.spinner("Analyzing email..."):
                     prompt = f"""
-Analyze this email and return ONLY valid JSON (no markdown, no backticks).
+Analyze this email sentiment and urgency.
 
 Email: {email_to_analyze[:500]}
 
-Return EXACTLY this format:
-{{"sentiment":"positive/negative/neutral","urgency":"high/medium/low","requires_response":true/false,"key_topics":["topic1","topic2"],"suggested_action":"brief action suggestion"}}
+Respond in this exact format:
+Sentiment: [positive/negative/neutral]
+Urgency: [high/medium/low]
+Key topics: [list topics as comma-separated]
+Action: [brief suggested action]
 """
                     try:
                         response = st.session_state.agent.model.generate_content(prompt)
-                        raw_response = response.text.strip()
-                        
-                        clean_response = raw_response
-                        clean_response = re.sub(r'```json\s*', '', clean_response)
-                        clean_response = re.sub(r'```\s*', '', clean_response)
-                        clean_response = clean_response.strip()
-                        
-                        parsed_data = json.loads(clean_response)
-                        
                         st.markdown("### Analysis Results")
-                        
-                        col_a, col_b, col_c = st.columns(3)
-                        
-                        with col_a:
-                            sentiment = parsed_data.get('sentiment', 'neutral')
-                            sentiment_icon = {'positive': '😊', 'negative': '😠', 'neutral': '😐'}.get(sentiment, '🤔')
-                            st.metric("Sentiment", f"{sentiment_icon} {sentiment.title()}")
-                        
-                        with col_b:
-                            urgency = parsed_data.get('urgency', 'medium')
-                            urgency_icon = {'high': '🚨', 'medium': '⚠️', 'low': '✅'}.get(urgency, '📧')
-                            st.metric("Urgency", f"{urgency_icon} {urgency.title()}")
-                        
-                        with col_c:
-                            requires_response = parsed_data.get('requires_response', True)
-                            response_icon = "✅ Yes" if requires_response else "❌ No"
-                            st.metric("Needs Reply", response_icon)
-                        
-                        st.subheader("Key Topics")
-                        topics = parsed_data.get('key_topics', [])
-                        if topics:
-                            for topic in topics:
-                                st.markdown(f"- {topic}")
-                        
-                        st.subheader("Suggested Action")
-                        suggested_action = parsed_data.get('suggested_action', 'Review the email')
-                        st.info(suggested_action)
-                        
+                        st.info(response.text)
                     except Exception as e:
                         st.error(f"Analysis failed: {e}")
-                        st.text("Raw response:")
-                        st.code(raw_response)
             else:
                 st.warning("Please paste an email to analyze")
     
@@ -548,6 +660,7 @@ Return EXACTLY this format:
         if hasattr(st.session_state, 'emails') and st.session_state.emails:
             df = pd.DataFrame(st.session_state.emails)
             if len(df) > 0:
+                # Domain extraction
                 df['domain'] = df['from'].apply(lambda x: x.split('@')[-1] if '@' in x else 'unknown')
                 domain_counts = df['domain'].value_counts().head(10)
                 
@@ -563,15 +676,18 @@ Return EXACTLY this format:
                     st.subheader("Email Statistics")
                     st.metric("Total Emails", len(df))
                     st.metric("Unique Senders", df['from'].nunique())
+                    unread = len([e for e in st.session_state.emails if not e.get('is_read', True)])
+                    st.metric("Unread Emails", unread)
                     if 'subject' in df.columns:
                         st.metric("Avg Subject Length", int(df['subject'].str.len().mean()))
                 
                 st.subheader("Recent Emails")
-                st.dataframe(df[['from', 'subject', 'date']], use_container_width=True)
+                display_df = df[['from', 'subject', 'date']].head(10)
+                st.dataframe(display_df, use_container_width=True)
             else:
                 st.info("No email data available")
         else:
-            st.info("Fetch emails from Inbox tab to see analytics")
+            st.info("Click 'Refresh Inbox' in the Inbox tab to see analytics")
 
 if __name__ == "__main__":
     main()
