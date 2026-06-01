@@ -117,13 +117,13 @@ class EmailAgent:
         except Exception as e:
             st.error(f"Model initialization failed: {e}")
             raise
-    
+
     def authenticate_with_app_password(self, email: str, app_password: str):
         """Authenticate using App Password with alternative ports"""
         try:
             clean_password = app_password.replace(" ", "")
             
-            # Try port 587 with STARTTLS first (most compatible)
+            # Try port 587 with STARTTLS
             try:
                 server = smtplib.SMTP('smtp.gmail.com', 587)
                 server.ehlo()
@@ -131,14 +131,11 @@ class EmailAgent:
                 server.ehlo()
                 server.login(email, clean_password)
                 server.quit()
-            except Exception as e1:
-                # Try port 465 with SSL as fallback
-                try:
-                    server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
-                    server.login(email, clean_password)
-                    server.quit()
-                except Exception as e2:
-                    return False, f"Cannot connect to Gmail SMTP. Error: {str(e2)}"
+            except:
+                # Try port 465 with SSL
+                server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+                server.login(email, clean_password)
+                server.quit()
             
             # Try IMAP for reading emails
             try:
@@ -146,7 +143,7 @@ class EmailAgent:
                 imap.login(email, clean_password)
                 imap.close()
             except:
-                pass  # IMAP might be blocked but sending may still work
+                pass
             
             self.gmail_user = email
             self.gmail_app_password = clean_password
@@ -166,7 +163,6 @@ class EmailAgent:
             msg['From'] = self.gmail_user
             msg['To'] = to
             msg['Subject'] = subject
-            
             msg.attach(MIMEText(body, 'plain'))
             
             # Try port 587 first
