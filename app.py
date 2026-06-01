@@ -11,11 +11,17 @@ import base64
 import time
 import re
 import json
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import pandas as pd
 import plotly.express as px
+import imaplib
+import email
+from email.header import decode_header
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -73,9 +79,13 @@ class EmailAgent:
         self.conversation_history = {}
         self.model = None
         self.model_name = None
+        self.gmail_user = None
+        self.gmail_app_password = None
+        self.service = None
+        self.use_app_password = False
+        
         genai.configure(api_key=gemini_api_key)
         self._initialize_model()
-        self.service = None
         
     def _initialize_model(self):
         try:
@@ -108,10 +118,143 @@ class EmailAgent:
             st.error(f"Model initialization failed: {e}")
             raise
     
+    def authenticate_with_app_password(self, email: str, app_password: str):
+        """Authenticate using App Password (works on Render!)"""
+        try:
+            # Test SMTP connection
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+                server.login(email, app_password)
+            
+            # Test IMAP connection for reading emails
+            imap = imaplib.IMAP4_SSL('imap.gmail.com')
+            imap.login(email, app_password)
+            imap.close()
+            
+            self.gmail_user = email
+            self.gmail_app_password = app_password
+            self.use_app_password = True
+            
+            return True, "✅ Gmail connected successfully with App Password!"
+        except Exception as e:
+            return False, f"❌ Authentication failed: {str(e)}"
+    
+    def send_email_app_password(self, to: str, subject: str, body: str) -> tuple:
+        """Send email using SMTP with App Password"""
+        if not self.use_app_password:
+            return False, "Gmail not connected. Please authenticate first."
+        
+        try:
+            msg = MIMEMultipart()
+            msg['From'] = self.gmail_user
+            msg['To'] = to
+            msg['Subject'] = subject
+            
+            msg.attach(MIMEText(body, 'plain'))
+            
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+                server.login(self.gmail_user, self.gmail_app_password)
+                server.send_message(msg)
+            
+            return True, "Email sent successfully!"
+        except Exception as e:
+            return False, f"Failed to send: {str(e)}"
+    
+    def get_unread_emails_app_password(self, max_results: int = 10) -> List[Dict]:
+        """Fetch unread emails using IMAP with App Password"""
+        if not self.use_app_password:
+            return []
+        
+        try:
+            imap = imaplib.IMAP4_SSL('imap.gmail.com')
+            imap.login(self.gmail_user, self.gmail_app_password)
+            imap.select('INBOX')
+            
+            # Search for unread emails
+            status, messages = imap.search(None, 'UNSEEN')
+            
+            if status != 'OK':
+                return []
+            
+            email_ids = messages[0].split()
+            email_ids = email_ids[:max_results]
+            
+            emails = []
+            
+            for email_id in email_ids:
+                if email_id.decode() in self.processed_emails:
+                    continue
+                
+                status, msg_data = imap.fetch(email_id, '(RFC822)')
+                
+                if status != 'OK':
+                    continue
+                
+                for response_part in msg_data:
+                    if isinstance(response_part, tuple):
+                        msg = email.message_from_bytes(response_part[1])
+                        
+                        # Decode subject
+                        subject, encoding = decode_header(msg['Subject'])[0]
+                        if isinstance(subject, bytes):
+                            subject = subject.decode(encoding if encoding else 'utf-8')
+                        
+                        # Get sender
+                        from_addr = msg['From']
+                        
+                        # Get date
+                        date = msg['Date']
+                        
+                        # Get body
+                        body = ""
+                        if msg.is_multipart():
+                            for part in msg.walk():
+                                if part.get_content_type() == "text/plain":
+                                    body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                                    break
+                        else:
+                            body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
+                        
+                        email_data = {
+                            'from': from_addr,
+                            'subject': subject if subject else "No Subject",
+                            'body': body[:5000],
+                            'message_id': email_id.decode(),
+                            'thread_id': email_id.decode(),
+                            'date': date
+                        }
+                        
+                        emails.append(email_data)
+                        self.processed_emails.add(email_id.decode())
+            
+            imap.close()
+            imap.logout()
+            
+            return emails
+            
+        except Exception as e:
+            st.error(f"Error fetching emails: {e}")
+            return []
+    
+    def mark_as_read_app_password(self, message_id: str):
+        """Mark email as read using IMAP"""
+        if not self.use_app_password:
+            return
+        
+        try:
+            imap = imaplib.IMAP4_SSL('imap.gmail.com')
+            imap.login(self.gmail_user, self.gmail_app_password)
+            imap.select('INBOX')
+            imap.store(message_id, '+FLAGS', '\\Seen')
+            imap.close()
+            imap.logout()
+        except Exception as e:
+            st.error(f"Error marking as read: {e}")
+    
     def authenticate_gmail(self, credentials_file: str = 'credentials.json'):
+        """Legacy OAuth method (kept for compatibility)"""
         if os.environ.get('RENDER') or os.environ.get('STREAMLIT_CLOUD'):
             self.service = None
-            return False, "Cloud mode: Gmail features require local installation."
+            return False, "Cloud mode: Use App Password method instead."
         
         creds = None
         token_file = 'token.pickle'
@@ -213,6 +356,10 @@ Reply:
             return f"Thank you for your email. We'll get back to you soon.\n\n(Note: AI generation error: {str(e)})"
     
     def send_email(self, to: str, subject: str, body: str, thread_id: str = None):
+        """Send email - works with both OAuth and App Password"""
+        if self.use_app_password:
+            return self.send_email_app_password(to, subject, body)
+        
         if not self.service:
             return False, "Gmail not connected."
         
@@ -245,6 +392,10 @@ Content-Type: text/plain; charset=utf-8
         return base64.urlsafe_b64encode(message_text.encode('utf-8')).decode('utf-8')
     
     def get_unread_emails(self, max_results: int = 10) -> List[Dict]:
+        """Get unread emails - works with both OAuth and App Password"""
+        if self.use_app_password:
+            return self.get_unread_emails_app_password(max_results)
+        
         if not self.service:
             return []
         
@@ -283,6 +434,10 @@ Content-Type: text/plain; charset=utf-8
             return []
     
     def mark_as_read(self, message_id: str):
+        """Mark email as read - works with both OAuth and App Password"""
+        if self.use_app_password:
+            return self.mark_as_read_app_password(message_id)
+        
         if not self.service:
             return
         
@@ -326,20 +481,58 @@ def main():
         if gemini_key:
             os.environ['GEMINI_API_KEY'] = gemini_key
         
-        st.subheader("Gmail Authentication (Optional)")
-        st.info("Skip if you just want to test AI features")
+        st.markdown("---")
+        st.subheader("Gmail Authentication")
         
-        uploaded_file = st.file_uploader(
-            "Upload credentials.json (from Google Cloud Console)",
-            type=['json'],
-            help="Required only for Gmail integration"
-        )
+        # App Password method (works everywhere!)
+        use_app_password = st.checkbox("Use App Password (Recommended for Cloud)", value=True)
         
-        if uploaded_file:
-            with open('credentials.json', 'wb') as f:
-                f.write(uploaded_file.getbuffer())
-            st.success("credentials.json saved!")
+        if use_app_password:
+            st.info("""
+            **How to get App Password:**
+            1. Enable 2-Step Verification on your Google Account
+            2. Go to Google Account → Security → App Passwords
+            3. Select 'Mail' and 'Other' (name it 'Email Agent')
+            4. Copy the 16-character password
+            """)
+            
+            gmail_email = st.text_input("Gmail Address", placeholder="youremail@gmail.com")
+            gmail_app_password = st.text_input("App Password", type="password", placeholder="abcd efgh ijkl mnop")
+            
+            if st.button("Connect Gmail", type="primary"):
+                if gmail_email and gmail_app_password:
+                    with st.spinner("Connecting to Gmail..."):
+                        if hasattr(st.session_state, 'agent'):
+                            success, message = st.session_state.agent.authenticate_with_app_password(
+                                gmail_email, 
+                                gmail_app_password.replace(" ", "")
+                            )
+                            if success:
+                                st.success(message)
+                                st.session_state.gmail_connected = True
+                                st.session_state.gmail_method = 'app_password'
+                            else:
+                                st.error(message)
+                        else:
+                            st.warning("Please initialize the AI Agent first")
+                else:
+                    st.warning("Please enter both email and app password")
+        else:
+            # Legacy OAuth method (local only)
+            st.info("Skip if you just want to test AI features")
+            
+            uploaded_file = st.file_uploader(
+                "Upload credentials.json (from Google Cloud Console)",
+                type=['json'],
+                help="Required only for Gmail integration"
+            )
+            
+            if uploaded_file:
+                with open('credentials.json', 'wb') as f:
+                    f.write(uploaded_file.getbuffer())
+                st.success("credentials.json saved!")
         
+        st.markdown("---")
         st.subheader("Settings")
         max_emails = st.slider("Max emails to process", 1, 20, 5)
         
@@ -352,33 +545,7 @@ def main():
                         st.session_state.agent = EmailAgent(gemini_key)
                         st.success(f"AI Agent initialized with {st.session_state.agent.model_name}")
                         
-                        if Path('credentials.json').exists():
-                            success, message = st.session_state.agent.authenticate_gmail()
-                            if success:
-                                st.success(message)
-                                st.session_state.gmail_connected = True
-                            else:
-                                st.warning(message)
-                        else:
-                            st.info("Gmail not configured. Using AI-only mode.")
-                        
                         st.session_state.initialized = True
-                        
-                        if os.environ.get('RENDER') or os.environ.get('STREAMLIT_CLOUD'):
-                            st.info("""
-                            Cloud Mode Active
-
-                            AI features are fully functional! You can:
-                            - Generate and test email replies
-                            - Analyze email sentiment
-                            - Create cold emails with AI
-                            - Generate professional emails
-
-                            For full Gmail integration (send/reply to real emails), run this app locally:
-                            streamlit run app.py
-
-                            Then upload your credentials.json file in the sidebar.
-                            """)
                         
                     except Exception as e:
                         st.error(f"Initialization failed: {e}")
@@ -388,39 +555,41 @@ def main():
             st.header("Stats")
             st.metric("Processed Emails", len(st.session_state.agent.processed_emails))
             st.metric("Model", st.session_state.agent.model_name)
+            if hasattr(st.session_state, 'gmail_connected') and st.session_state.gmail_connected:
+                st.success("✅ Gmail Connected")
     
     if not hasattr(st.session_state, 'initialized') or not st.session_state.initialized:
         st.info("Please enter your Gemini API Key and click 'Initialize Agent'")
         
         with st.expander("Quick Start Guide (FREE)", expanded=True):
             st.markdown("""
-            Step 1: Get Free Gemini API Key
+            ### Step 1: Get Free Gemini API Key
             1. Visit https://makersuite.google.com/app/apikey
             2. Sign in with your Google account
             3. Click Create API Key
             4. Copy the key
 
-            Step 2: Use the AI Features
-            - Test AI replies without Gmail setup
-            - Generate professional emails
-            - Analyze email sentiment
+            ### Step 2: Get Gmail App Password (Optional)
+            1. Enable 2-Step Verification on your Google Account
+            2. Go to Security → App Passwords
+            3. Generate password for 'Mail' and 'Other'
+            4. Copy the 16-character password
 
-            Step 3: Add Gmail Integration (Optional)
-            1. Go to Google Cloud Console
-            2. Create project -> Enable Gmail API
-            3. Create OAuth 2.0 credentials (Desktop app)
-            4. Download credentials.json
-            5. Upload in sidebar
+            ### Step 3: Use the AI Features
+            - Generate AI replies to any email
+            - Analyze email sentiment
+            - Create professional emails
+            - Send real emails with Gmail
             """)
         return
     
-    tab1, tab2, tab3, tab4 = st.tabs(["Inbox", "Compose", "AI Playground", "Analytics"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📧 Inbox", "✍️ Compose", "🤖 AI Playground", "📊 Analytics"])
     
     with tab1:
         st.header("Email Inbox")
         
         if not hasattr(st.session_state, 'gmail_connected') or not st.session_state.gmail_connected:
-            st.warning("Gmail not connected. Upload credentials.json in sidebar to enable email features.")
+            st.warning("Gmail not connected. Use App Password in sidebar to enable email features.")
         else:
             col1, col2 = st.columns([3, 1])
             with col1:
@@ -436,9 +605,9 @@ def main():
                     with st.container():
                         st.markdown(f"""
                         <div class="email-card">
-                            <strong>From:</strong> {email['from']}<br>
-                            <strong>Subject:</strong> {email['subject']}<br>
-                            <strong>Date:</strong> {email.get('date', 'Unknown')}
+                            <strong>📨 From:</strong> {email['from']}<br>
+                            <strong>📌 Subject:</strong> {email['subject']}<br>
+                            <strong>📅 Date:</strong> {email.get('date', 'Unknown')}
                         </div>
                         """, unsafe_allow_html=True)
                         
@@ -523,7 +692,7 @@ def main():
                     else:
                         st.error(f"Failed to send: {result}")
                 else:
-                    st.info("Demo mode: Email not sent (Gmail not configured)")
+                    st.info("Connect Gmail in sidebar to send real emails")
                     st.code(f"To: {recipient}\nSubject: {subject}\n\n{body}")
             else:
                 st.warning("Please fill all fields")
