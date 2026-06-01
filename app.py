@@ -141,53 +141,53 @@ class EmailAgent:
     #     except Exception as e:
     #         return False, f"❌ Authentication failed: {str(e)}"
     def authenticate_with_app_password(self, email: str, app_password: str):
-    """Authenticate using App Password with alternative ports"""
-    try:
-        clean_password = app_password.replace(" ", "")
-        
-        # Try ALL possible SMTP configurations
-        smtp_configs = [
-            ('smtp.gmail.com', 587, 'tls'),
-            ('smtp.gmail.com', 465, 'ssl'),
-        ]
-        
-        smtp_success = False
-        
-        for host, port, security in smtp_configs:
-            try:
-                if security == 'tls':
-                    server = smtplib.SMTP(host, port)
-                    server.ehlo()
-                    server.starttls()
-                    server.ehlo()
-                else:
-                    server = smtplib.SMTP_SSL(host, port)
-                
-                server.login(email, clean_password)
-                server.quit()
-                smtp_success = True
-                break
-            except:
-                continue
-        
-        if not smtp_success:
-            return False, "Cannot connect to Gmail SMTP. Please check your App Password or Render network settings."
-        
-        # Try IMAP for reading emails
+        """Authenticate using App Password with alternative ports"""
         try:
-            imap = imaplib.IMAP4_SSL('imap.gmail.com', 993)
-            imap.login(email, clean_password)
-            imap.close()
-        except:
-            pass  # IMAP might fail but sending may still work
-        
-        self.gmail_user = email
-        self.gmail_app_password = clean_password
-        self.use_app_password = True
-        
-        return True, "✅ Gmail connected successfully!"
-    except Exception as e:
-        return False, f"❌ Authentication failed: {str(e)}"
+            clean_password = app_password.replace(" ", "")
+            
+            # Try ALL possible SMTP configurations
+            smtp_configs = [
+                ('smtp.gmail.com', 587, 'tls'),
+                ('smtp.gmail.com', 465, 'ssl'),
+            ]
+            
+            smtp_success = False
+            
+            for host, port, security in smtp_configs:
+                try:
+                    if security == 'tls':
+                        server = smtplib.SMTP(host, port)
+                        server.ehlo()
+                        server.starttls()
+                        server.ehlo()
+                    else:
+                        server = smtplib.SMTP_SSL(host, port)
+                    
+                    server.login(email, clean_password)
+                    server.quit()
+                    smtp_success = True
+                    break
+                except:
+                    continue
+            
+            if not smtp_success:
+                return False, "Cannot connect to Gmail SMTP. Please check your App Password or Render network settings."
+            
+            # Try IMAP for reading emails
+            try:
+                imap = imaplib.IMAP4_SSL('imap.gmail.com', 993)
+                imap.login(email, clean_password)
+                imap.close()
+            except:
+                pass  # IMAP might fail but sending may still work
+            
+            self.gmail_user = email
+            self.gmail_app_password = clean_password
+            self.use_app_password = True
+            
+            return True, "✅ Gmail connected successfully!"
+        except Exception as e:
+            return False, f"❌ Authentication failed: {str(e)}"
     
     def send_email_app_password(self, to: str, subject: str, body: str) -> tuple:
         """Send email using SMTP with App Password"""
